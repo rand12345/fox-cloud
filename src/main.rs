@@ -89,7 +89,7 @@ async fn forward(bind_ip: &str, local_port: i32, remote: &str) -> Result<(), Box
     } else {
         format!("{}:{}", bind_ip, local_port)
     };
-    warn!("Remote TCP: {bind_addr}");
+    println!("Remote TCP: {bind_addr}");
     let bind_sock = match bind_addr
         .parse::<std::net::SocketAddr>(){
             Ok(b) => b,
@@ -100,6 +100,7 @@ async fn forward(bind_ip: &str, local_port: i32, remote: &str) -> Result<(), Box
 
     // We have either been provided an IP address or a host name.
     let remote = std::sync::Arc::new(remote.to_string());
+    
 
 
     async fn read_send_and_forward<R, W>(
@@ -122,7 +123,7 @@ async fn forward(bind_ip: &str, local_port: i32, remote: &str) -> Result<(), Box
                     bytes_read = result?;
                 },
                 _ = abort.recv() => {
-                    warn!("Abort");
+                    eprintln!("Abort");
                     break;
                 }
             }
@@ -130,7 +131,7 @@ async fn forward(bind_ip: &str, local_port: i32, remote: &str) -> Result<(), Box
             if bytes_read == 0 {
                 break;
             }
-            warn!("Inv > FoxCloud {buf:?}");
+            println!("Inv <> FoxCloud {buf:?}");
 
             write.write_all(&buf[0..bytes_read]).await?;
             copied += bytes_read;
@@ -141,15 +142,17 @@ async fn forward(bind_ip: &str, local_port: i32, remote: &str) -> Result<(), Box
     loop {
         let remote = remote.clone();
         let (mut client, client_addr) = listener.accept().await?;
-
+        
         tokio::spawn(async move {
-            println!("New connection from {}", client_addr);
-            // Establish connection to upstream for each incoming client connection
             let mut remote = match TcpStream::connect(remote.as_str()).await{
                 Ok(s) => s,
                 Err(e) => panic!("{e:?}"),
             };
-            warn!("Connected to {remote:?}");
+            println!("New connection from {}", client_addr);
+            // Establish connection to upstream for each incoming client connection
+            
+            
+            println!("Connected to {remote:?}");
             let (mut client_read, mut client_write) = client.split();
             let (mut remote_read, mut remote_write) = remote.split();
 
