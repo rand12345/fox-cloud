@@ -90,11 +90,13 @@ async fn forward(bind_ip: &str, local_port: i32, remote: &str) -> Result<(), Box
         format!("{}:{}", bind_ip, local_port)
     };
     warn!("Remote TCP: {bind_addr}");
-    let bind_sock = bind_addr
-        .parse::<std::net::SocketAddr>()
-        .expect("Failed to parse bind address");
+    let bind_sock = match bind_addr
+        .parse::<std::net::SocketAddr>(){
+            Ok(b) => b,
+            Err(e) => panic!("Failed to connect to bind address. {e:?}")
+        };
     let listener = TcpListener::bind(&bind_sock).await?;
-    println!("Listening on {}", listener.local_addr().unwrap());
+    println!("Listening on {}, Bound to {:?}", listener.local_addr().unwrap(), bind_sock);
 
     // We have either been provided an IP address or a host name.
     let remote = std::sync::Arc::new(remote.to_string());
