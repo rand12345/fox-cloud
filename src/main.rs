@@ -1,13 +1,20 @@
+use byteorder::BigEndian;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::FutureExt;
 use getopts::Options;
+use log::warn;
 use std::env;
+use std::io::{Cursor, Error, ErrorKind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
-use tokio_modbus::prelude::Writer;
-use tokio_modbus::{client::Context, prelude::Reader};
-
+// use tokio_modbus::client::rtu;
+// use tokio_modbus::prelude::Writer;
+// use tokio_modbus::slave::{Slave, SlaveId};
+// use tokio_modbus::{client::Context, prelude::Reader};
+mod frame;
+mod slave;
 type BoxedError = Box<dyn std::error::Error + Sync + Send + 'static>;
 static DEBUG: AtomicBool = AtomicBool::new(false);
 const BUF_SIZE: usize = 1024;
@@ -126,7 +133,7 @@ async fn forward(bind_ip: &str, local_port: i32, remote: &str) -> Result<(), Box
         Ok(copied)
     }
 
-    async fn read_inverter_send_and_forward<R, W>(
+    async fn read_send_and_forward<R, W>(
         read: &mut R,
         write: &mut W,
         mut abort: broadcast::Receiver<()>,
@@ -137,7 +144,6 @@ async fn forward(bind_ip: &str, local_port: i32, remote: &str) -> Result<(), Box
     {
         let mut copied = 0;
         let mut buf = [0u8; BUF_SIZE];
-        let ctx = rtu::connect_slave(port, slave).await?;
         loop {
             let bytes_read;
             tokio::select! {
@@ -151,15 +157,14 @@ async fn forward(bind_ip: &str, local_port: i32, remote: &str) -> Result<(), Box
                 }
             }
 
-
             if bytes_read == 0 {
                 break;
             }
+            warn!("Inv > FoxCloud {buf:?}");
 
             write.write_all(&buf[0..bytes_read]).await?;
             copied += bytes_read;
         }
-
         Ok(copied)
     }
 
@@ -182,7 +187,6 @@ async fn forward(bind_ip: &str, local_port: i32, remote: &str) -> Result<(), Box
 
         tokio::spawn(async move {
             println!("New connection from {}", client_addr);
-
             // Establish connection to upstream for each incoming client connection
             let mut remote = TcpStream::connect(remote.as_str()).await?;
             let (mut client_read, mut client_write) = client.split();
@@ -192,9 +196,9 @@ async fn forward(bind_ip: &str, local_port: i32, remote: &str) -> Result<(), Box
             let (remote_copied, client_copied) = tokio::join! {
 
 
-                read_cloud_send_and_forward(&mut remote_read, &mut client_write, cancel.subscribe())
+                read_send_and_forward(&mut remote_read, &mut client_write, cancel.subscribe())
                     .then(|r| { let _ = cancel.send(()); async { r } }),
-                read_inverter_send_and_forward(&mut client_read, &mut remote_write, cancel.subscribe())
+                read_send_and_forward(&mut client_read, &mut remote_write, cancel.subscribe())
                     .then(|r| { let _ = cancel.send(()); async { r } }),
             };
 
@@ -238,4 +242,29 @@ async fn forward(bind_ip: &str, local_port: i32, remote: &str) -> Result<(), Box
             r
         });
     }
+}
+
+fn calc_crc(data: &[u8]) -> u16 {
+    let mut crc = 0xFFFF;
+    for x in data {
+        crc ^= u16::from(*x);
+        for _ in 0..8 {
+            let crc_odd = (crc & 0x0001) != 0;
+            crc >>= 1;
+            if crc_odd {
+                crc ^= 0xA001;
+            }
+        }
+    }
+    crc << 8 | crc >> 8
+}
+fn check_crc(adu_data: &[u8], expected_crc: u16) -> Result<(), Error> {
+    let actual_crc = calc_crc(adu_data);
+    if expected_crc != actual_crc {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("Invalid CRC: expected = 0x{expected_crc:0>4X}, actual = 0x{actual_crc:0>4X}"),
+        ));
+    }
+    Ok(())
 }
