@@ -38,7 +38,7 @@ async fn main() -> Result<(), BoxedError> {
     opts.optopt(
         "b",
         "bind",
-        "The address on which to listen for incoming requests, defaulting to localhost",
+        "The address on which to listen for incoming requests, defaulting to 0.0.0.0",
         "BIND_ADDR",
     );
     opts.optopt(
@@ -75,7 +75,7 @@ async fn main() -> Result<(), BoxedError> {
     let local_port: i32 = matches.opt_str("l").map(|s| s.parse()).unwrap_or(Ok(0))?;
     let bind_addr = match matches.opt_str("b") {
         Some(addr) => addr,
-        None => "127.0.0.1".to_owned(),
+        None => "0.0.0.0".to_owned(),
     };
 
     forward(&bind_addr, local_port, remote).await
@@ -153,6 +153,7 @@ async fn forward(bind_ip: &str, local_port: i32, remote: &str) -> Result<(), Box
                     bytes_read = result?;
                 },
                 _ = abort.recv() => {
+                    warn!("Abort");
                     break;
                 }
             }
