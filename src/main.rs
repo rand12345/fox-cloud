@@ -145,7 +145,10 @@ async fn forward(bind_ip: &str, local_port: i32, remote: &str) -> Result<(), Box
         tokio::spawn(async move {
             println!("New connection from {}", client_addr);
             // Establish connection to upstream for each incoming client connection
-            let mut remote = TcpStream::connect(remote.as_str()).await?;
+            let mut remote = match TcpStream::connect(remote.as_str()).await{
+                Ok(s) => s,
+                Err(e) => panic!("{e:?}"),
+            };
             warn!("Connected to {remote:?}");
             let (mut client_read, mut client_write) = client.split();
             let (mut remote_read, mut remote_write) = remote.split();
