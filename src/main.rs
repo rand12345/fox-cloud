@@ -89,6 +89,7 @@ async fn forward(bind_ip: &str, local_port: i32, remote: &str) -> Result<(), Box
     } else {
         format!("{}:{}", bind_ip, local_port)
     };
+    warn!("Remote TCP: {bind_addr}");
     let bind_sock = bind_addr
         .parse::<std::net::SocketAddr>()
         .expect("Failed to parse bind address");
@@ -98,40 +99,6 @@ async fn forward(bind_ip: &str, local_port: i32, remote: &str) -> Result<(), Box
     // We have either been provided an IP address or a host name.
     let remote = std::sync::Arc::new(remote.to_string());
 
-    async fn copy_with_abort<R, W>(
-        read: &mut R,
-        write: &mut W,
-        mut abort: broadcast::Receiver<()>,
-    ) -> tokio::io::Result<usize>
-    where
-        R: tokio::io::AsyncRead + Unpin,
-        W: tokio::io::AsyncWrite + Unpin,
-    {
-        let mut copied = 0;
-        let mut buf = [0u8; BUF_SIZE];
-        loop {
-            let bytes_read;
-            tokio::select! {
-                biased;
-
-                result = read.read(&mut buf) => {
-                    bytes_read = result?;
-                },
-                _ = abort.recv() => {
-                    break;
-                }
-            }
-
-            if bytes_read == 0 {
-                break;
-            }
-
-            write.write_all(&buf[0..bytes_read]).await?;
-            copied += bytes_read;
-        }
-
-        Ok(copied)
-    }
 
     async fn read_send_and_forward<R, W>(
         read: &mut R,
@@ -169,19 +136,6 @@ async fn forward(bind_ip: &str, local_port: i32, remote: &str) -> Result<(), Box
         Ok(copied)
     }
 
-    async fn process_invert_send() {}
-    async fn read_cloud_send_and_forward<R, W>(
-        read: &mut R,
-        write: &mut W,
-        mut abort: broadcast::Receiver<()>,
-    ) -> tokio::io::Result<usize>
-    where
-        R: tokio::io::AsyncRead + Unpin,
-        W: tokio::io::AsyncWrite + Unpin,
-    {
-        Ok(1)
-    }
-
     loop {
         let remote = remote.clone();
         let (mut client, client_addr) = listener.accept().await?;
@@ -190,10 +144,12 @@ async fn forward(bind_ip: &str, local_port: i32, remote: &str) -> Result<(), Box
             println!("New connection from {}", client_addr);
             // Establish connection to upstream for each incoming client connection
             let mut remote = TcpStream::connect(remote.as_str()).await?;
+            warn!("Connected to {remote:?}");
             let (mut client_read, mut client_write) = client.split();
             let (mut remote_read, mut remote_write) = remote.split();
 
             let (cancel, _) = broadcast::channel::<()>(1);
+            loop {
             let (remote_copied, client_copied) = tokio::join! {
 
 
@@ -238,7 +194,7 @@ async fn forward(bind_ip: &str, local_port: i32, remote: &str) -> Result<(), Box
                     eprintln!("{}", err);
                 }
             };
-
+        }
             let r: Result<(), BoxedError> = Ok(());
             r
         });
