@@ -1,9 +1,6 @@
-use crc16::*;
 use futures::FutureExt;
 use getopts::Options;
-use log::warn;
 use std::env;
-use std::io::{Cursor, Error, ErrorKind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -131,10 +128,12 @@ async fn forward(bind_ip: &str, local_port: i32, remote: &str) -> Result<(), Box
 
             match Middleware::new(&buf[0..bytes_read]) {
                 Ok(decoded) => {
-                    println!("Inv << Fox {:02x?}", decoded.raw);
-                    println!("Inv << Fox {:02x?}", decoded.modbus);
+                    let m = decoded.modbus.unwrap();
+                    print!("Request ID {}, ", m.id);
+                    println!("req {} values from register {}", m.len, m.address);
+                    m.decode_request_payload().await;
                 }
-                Err(e) => eprintln!("{e:?}"),
+                Err(e) => (), //eprintln!("{e:?}"),
             }
             write.write_all(&buf[0..bytes_read]).await?;
             copied += bytes_read;
@@ -173,9 +172,15 @@ async fn forward(bind_ip: &str, local_port: i32, remote: &str) -> Result<(), Box
 
             match Middleware::new(&buf[0..bytes_read]) {
                 Ok(decoded) => {
-                    println!("Inv >> Fox {:02x?}", decoded.modbus);
+                    let m = decoded.modbus.unwrap();
+                    print!("Respond to ID {} ", m.id);
+                    println!("with {} values: {:?}", m.len, m.payload);
+
+                    if m.decode_response_payload().await.is_ok() {
+                        let _ = m.decode_readmodes().await;
+                    }
                 }
-                Err(e) => eprintln!("{e:?}"),
+                Err(e) => (), //eprintln!("{e:?}"),
             }
             write.write_all(&buf[0..bytes_read]).await?;
             copied += bytes_read;

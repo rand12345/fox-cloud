@@ -1,4 +1,11 @@
-use std::default;
+use lazy_static::lazy_static;
+use std::collections::HashMap;
+use tokio::sync::Mutex;
+
+lazy_static! {
+    static ref DATA_STORE: Mutex<HashMap<ReadModes, Vec<u8>>> = Mutex::new(HashMap::new());
+    static ref REQUEST_STORE: Mutex<HashMap<u32, Option<ReadModes>>> = Mutex::new(HashMap::new());
+}
 
 #[derive(Debug)]
 pub enum DecodeError {
@@ -42,8 +49,8 @@ impl Middleware {
                 modbus: Some(modbus_decoder),
             })
         } else {
-            let (data, _frame_type) = HdlcFrame::default().decode_hdlc_frame(raw)?;
-            println!("HDLC Frame {raw:?}");
+            // let (data, _frame_type) = HdlcFrame::default().decode_hdlc_frame(raw)?;
+            // println!("HDLC Frame {raw:?}");
             Err(DecodeError::IoError(std::io::ErrorKind::NotFound.into()))
         }
     }
@@ -92,16 +99,6 @@ impl HdlcFrame {
 }
 
 #[derive(Debug, Default)]
-pub struct ModbusFrame {
-    function: u8,
-    pub address: u16,
-    counter: u16,
-    len: u16,
-    pub payload: Vec<u8>,
-    crc: u16,
-    pub mode: ModbusMode,
-}
-#[derive(Debug, Default)]
 pub enum ModbusMode {
     #[default]
     Request = 0x11,
@@ -109,25 +106,66 @@ pub enum ModbusMode {
     Unknown = 0,
 }
 
-#[derive(Debug)]
-enum ReadModes {
-    SystemTime = 40000,
-    BasicParameters1 = 40006,
-    WorkModParameters = 41000,
-    ChargingTime = 41001,
-    BasicParameters2 = 41007,
+#[derive(Debug, Eq, Hash, PartialEq, Clone)]
+pub enum ReadModes {
+    SystemTime,
+    BasicParameters1,
+    WorkModeParameters,
+    ChargingTime,
+    BasicParameters2,
+    SafetyStartParameters,
+    SafetyVoltageParameters,
+    SafetyFrequency,
+    SafetyPowerFactor,
+    SafetyPU,
+    SafetyDci,
+    SafetyReactive,
+    // Operation,
+    BatteryVoltage150,
+    BatteryVoltage51100,
+    BatteryVoltage101144,
+    BatteryTemperature,
     Unknown,
     // BatteryVoltage1_50 =
 }
 impl ReadModes {
     fn decode(address: u16) -> ReadModes {
         match address {
-            40000 => ReadModes::SystemTime,
-            40006 => ReadModes::BasicParameters1,
+            40000 => ReadModes::SystemTime,              //3072
+            40006 => ReadModes::BasicParameters1,        //5120
+            41000 => ReadModes::WorkModeParameters,      //512
+            41001 => ReadModes::ChargingTime,            //3072
+            41007 => ReadModes::BasicParameters2,        //8193
+            42000 => ReadModes::SafetyStartParameters,   //4608
+            42100 => ReadModes::SafetyVoltageParameters, //6144
+            42200 => ReadModes::SafetyFrequency,         //5120
+            42300 => ReadModes::SafetyPowerFactor,       //10100
+            42700 => ReadModes::SafetyPU,                //4096
+            42800 => ReadModes::SafetyDci,               //2560
+            43000 => ReadModes::SafetyReactive,          //13824
+            // 60000 => ReadModes::Operation,
+            60000 => ReadModes::BatteryVoltage150,    //25600
+            60050 => ReadModes::BatteryVoltage51100,  //25600
+            60100 => ReadModes::BatteryVoltage101144, //22528
+            61000 => ReadModes::BatteryTemperature,   //16896
+
             _ => ReadModes::Unknown,
         }
     }
 }
+
+#[derive(Debug, Default)]
+pub struct ModbusFrame {
+    pub id: u32,
+    pub function: u8,
+    pub address: u16,
+    pub len: u16,
+    pub payload: Vec<u8>,
+    pub crc: u16,
+    pub mode: ModbusMode,
+    pub readmode: Option<ReadModes>,
+}
+
 impl ModbusFrame {
     /*
 
@@ -144,27 +182,36 @@ impl ModbusFrame {
             return Err(DecodeError::IoError(std::io::ErrorKind::InvalidData.into()));
         }
 
-        // ab, 63, ff, 17, 0c, 00, 01, 01, fb, ca,
-        println!("Decoder << {data:?}");
+        // request
+        // fn    count    *LEN*       Addrs *Len*  (Requested number of registers)
+        // 11 71 EA EF 34 00 06 01 03 EE 48 00 21 F1 0D (61000)
+        //                           Len* - response length
+        // 91 71 EA EF 34 00 45 01 03 42 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 6E 91
+
+        //    Cntr
+        // 11 90 E9 EF 34 00 06 01 03 EA C4 00 2C 80 6A (60100)
+        // 91 90 E9 EF 34 00 5B 01 03 58 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 4E 20
+
+        // 11 B6 49 F0 34 00 06 01 03 A4 10 00 09 AC B1
+        // 91 B6 49 F0 34 00 15 01 03 12 00 00 00 3C 03 E8 00 3C 03 E8 0A 6C 07 01 14 5A 12 84 D5 1A
+
+        // response
+        // fn             *LEN*             |<--  Data          ---->| CRC16
+        // 91 75 E5 EF 34 00 0D 01 03 0A 00 03 01 2C 00 32 03 84 00 08 74 68 (response to 42300)
+        // 91 C0 E4 EF 34 00 13 01 03 10 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 14 E7
+        // 91 04 DF EF 34 00 21 01 03 1E 00 21 12 5C 12 5C 12 5C 00 00 13 97 13 B0 15 A4 00 14 00 05 00 1E 00 A7 00 64 00 64 00 00 E8 75
+        // 91 71 EA EF 34 00 45 01 03 42 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 6E 91
+        // let hex_string = data
+        //     .iter()
+        //     .map(|b| format!("{:02X}", b))
+        //     .collect::<Vec<String>>()
+        //     .join(" ");
+        // println!("Decoder << {hex_string}");
+
         let function = data[2];
-        let mode = match function {
-            0x11 => ModbusMode::Request,
-            0x91 => ModbusMode::Response,
-            _ => ModbusMode::Unknown,
-        };
-        let address = u16::from_be_bytes([data[0xb], data[0xc]]);
-        if matches!(mode, ModbusMode::Request) {
-            println!("Read mode {:?}", ReadModes::decode(address))
-        }
-        let counter = u16::from_be_bytes([data[3], data[4]]);
-        let (len, payload) = match mode {
-            ModbusMode::Request => (0, data[0x5..data.len() - 2].to_vec()),
-            ModbusMode::Response => (
-                u16::from_be_bytes([data[0xd], data[0xe]]),
-                data[0xf..data.len() - 2].to_vec(),
-            ),
-            ModbusMode::Unknown => (0, data[0x5..data.len() - 2].to_vec()),
-        };
+        let id = u32::from_be_bytes([data[3], data[4], data[5], data[6]]); //ok
+                                                                           // let data_len = u16::from_be_bytes([data[7], data[8]]); //ok
+        let address = u16::from_be_bytes([data[11], data[12]]); // req only
 
         let crc_calc = self.crc16(&data[2..data.len() - 4]);
         let crc = u16::from_le_bytes([data[data.len() - 4], data[data.len() - 3]]);
@@ -173,23 +220,104 @@ impl ModbusFrame {
             return Err(DecodeError::IoError(std::io::ErrorKind::InvalidData.into()));
         };
 
-        println!(
-            "Debug Addr: {address} be {} le {}",
-            u16::from_be_bytes([data[0xb], data[0xc]]),
-            u16::from_le_bytes([data[0xb], data[0xc]])
-        );
+        let mode = match function {
+            0x11 => ModbusMode::Request,
+            0x91 => ModbusMode::Response,
+            _ => ModbusMode::Unknown,
+        };
+        // let request_len = u16::from_be_bytes([data[13], data[14]]); //req only
+        // let response_len = u16::from_be_bytes([0, data[11]]); //resp only
+        let (len, payload) = match mode {
+            ModbusMode::Request | ModbusMode::Unknown => {
+                (u16::from_be_bytes([data[13], data[14]]), vec![])
+            }
+            ModbusMode::Response => (
+                u16::from_be_bytes([0, data[11]]),
+                data[12..data.len() - 4].to_vec(),
+            ),
+        };
+        let readmode = Some(ReadModes::decode(address));
+        // println!(
+        //     "Debug Addr: {address} be {} le {}",
+        //     u16::from_be_bytes([data[0xb], data[0xc]]),
+        //     u16::from_le_bytes([data[0xb], data[0xc]])
+        // );
+
         Ok(ModbusFrame {
+            id,
             function,
             address,
-            counter,
             len,
             payload,
             crc,
             mode,
+            readmode,
         })
     }
 
-    // 7e, 7e, 02, 63, fe, ad, aa, 00, f4, 00, 00, 00, 00, 00, 00, 00, 00
+    pub async fn decode_request_payload(&self) {
+        let mut req_store = REQUEST_STORE.lock().await;
+        let _insert = req_store.insert(self.id, self.readmode.clone());
+        println!("Recorded {:?} to {:?} as request", self.id, self.readmode);
+    }
+    pub async fn decode_response_payload(&self) -> Result<(), DecodeError> {
+        let mut req_store = REQUEST_STORE.lock().await;
+        let address = if let Some(addr) = req_store.remove(&self.id) {
+            println!("Recovered request {:?} for id: {}", addr, self.id);
+            addr
+        } else {
+            return Err(DecodeError::IoError(std::io::ErrorKind::InvalidData.into()));
+        };
+        drop(req_store);
+        let mut data_store = DATA_STORE.lock().await;
+        let stored = data_store.insert(address.to_owned().unwrap(), self.payload.clone());
+        println!(
+            "Replaced value: {:02x?} at {:?} with {:?}",
+            stored, address, self.payload
+        );
+        Ok(())
+    }
+    pub async fn decode_readmodes(&self) -> Result<(), DecodeError> {
+        let readmode = match &self.readmode {
+            Some(rm) => rm,
+            None => return Err(DecodeError::IoError(std::io::ErrorKind::InvalidData.into())),
+        };
+        let data_store = DATA_STORE.lock().await;
+        let d = if let Some(val) = data_store.get(readmode) {
+            val
+        } else {
+            return Err(DecodeError::IoError(std::io::ErrorKind::InvalidData.into()));
+        };
+        match readmode {
+            ReadModes::SystemTime => {
+                println!(
+                    "Date {}/{}/{} Time {}:{}:{}",
+                    d[1], d[3], d[5], d[7], d[9], d[11]
+                );
+            } //[0, 23, 0, 3, 0, 1, 0, 19, 0, 9, 0, 25]}
+            ReadModes::BasicParameters1 => {
+                println!("Modbus RTU address: {}", d[13]);
+                //0, 3, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 247, 0, 0, 0, 180, 0, 255
+            }
+            _ => (), /*
+                     ReadModes::WorkModeParameters => todo!(),
+                     ReadModes::ChargingTime => todo!(),
+                     ReadModes::BasicParameters2 => todo!(),
+                     ReadModes::SafetyStartParameters => todo!(),
+                     ReadModes::SafetyVoltageParameters => todo!(),
+                     ReadModes::SafetyFrequency => todo!(),
+                     ReadModes::SafetyPowerFactor => todo!(),
+                     ReadModes::SafetyPU => todo!(),
+                     ReadModes::SafetyDci => todo!(),
+                     ReadModes::SafetyReactive => todo!(),
+                     ReadModes::BatteryVoltage150 => todo!(),
+                     ReadModes::BatteryVoltage51100 => todo!(),
+                     ReadModes::BatteryVoltage101144 => todo!(),
+                     ReadModes::BatteryTemperature => todo!(),
+                     ReadModes::Unknown => todo!(), */
+        };
+        Ok(())
+    }
 
     fn crc16(&mut self, data: &[u8]) -> u16 {
         let mut crc: u16 = 0xFFFF;
