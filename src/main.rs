@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
+
+use crate::decoder::Middleware;
 mod decoder;
 
 type BoxedError = Box<dyn std::error::Error + Sync + Send + 'static>;
@@ -126,13 +128,14 @@ async fn forward(bind_ip: &str, local_port: i32, remote: &str) -> Result<(), Box
             if bytes_read == 0 {
                 break;
             }
-            let modbus = &buf[2..bytes_read - 2];
 
-            println!("Inv << FoxCloud {:?}", &buf[2..bytes_read - 2]);
-            let mut decoded = decoder::ModbusFrame::default();
-            decoded.decode_modbus_request(modbus);
-            println!("Inv << FoxCloud {:?}", decoded);
-
+            match Middleware::new(&buf[0..bytes_read]) {
+                Ok(decoded) => {
+                    println!("Inv << Fox {:02x?}", decoded.raw);
+                    println!("Inv << Fox {:02x?}", decoded.modbus);
+                }
+                Err(e) => eprintln!("{e:?}"),
+            }
             write.write_all(&buf[0..bytes_read]).await?;
             copied += bytes_read;
         }
@@ -167,13 +170,13 @@ async fn forward(bind_ip: &str, local_port: i32, remote: &str) -> Result<(), Box
             if bytes_read == 0 {
                 break;
             }
-            let modbus = &buf[2..bytes_read - 2];
 
-            println!("Inv >> FoxCloud {:?}", &buf[2..bytes_read - 2]);
-
-            let mut decoded = decoder::ModbusFrame::default();
-            decoded.decode_modbus_response(modbus);
-            println!("Inv >> FoxCloud {:?}", decoded);
+            match Middleware::new(&buf[0..bytes_read]) {
+                Ok(decoded) => {
+                    println!("Inv >> Fox {:02x?}", decoded.modbus);
+                }
+                Err(e) => eprintln!("{e:?}"),
+            }
             write.write_all(&buf[0..bytes_read]).await?;
             copied += bytes_read;
         }
