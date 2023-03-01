@@ -1,5 +1,4 @@
-use byteorder::BigEndian;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use crc16::*;
 use futures::FutureExt;
 use getopts::Options;
 use log::warn;
@@ -9,12 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
-// use tokio_modbus::client::rtu;
-// use tokio_modbus::prelude::Writer;
-// use tokio_modbus::slave::{Slave, SlaveId};
-// use tokio_modbus::{client::Context, prelude::Reader};
-mod frame;
-mod slave;
+mod decoder;
+
 type BoxedError = Box<dyn std::error::Error + Sync + Send + 'static>;
 static DEBUG: AtomicBool = AtomicBool::new(false);
 const BUF_SIZE: usize = 1024;
@@ -90,20 +85,20 @@ async fn forward(bind_ip: &str, local_port: i32, remote: &str) -> Result<(), Box
         format!("{}:{}", bind_ip, local_port)
     };
     println!("Remote TCP: {bind_addr}");
-    let bind_sock = match bind_addr
-        .parse::<std::net::SocketAddr>(){
-            Ok(b) => b,
-            Err(e) => panic!("Failed to connect to bind address. {e:?}")
-        };
+    let bind_sock = match bind_addr.parse::<std::net::SocketAddr>() {
+        Ok(b) => b,
+        Err(e) => panic!("Failed to connect to bind address. {e:?}"),
+    };
     let listener = TcpListener::bind(&bind_sock).await?;
-    println!("Listening on {}, Bound to {:?}", listener.local_addr().unwrap(), bind_sock);
+    println!(
+        "Listening on {}, Bound to {:?}",
+        listener.local_addr().unwrap(),
+        bind_sock
+    );
 
     // We have either been provided an IP address or a host name.
     let remote = std::sync::Arc::new(remote.to_string());
-    
-
-
-    async fn read_send_and_forward<R, W>(
+    async fn read_cloud_send_and_forward<R, W>(
         read: &mut R,
         write: &mut W,
         mut abort: broadcast::Receiver<()>,
@@ -131,8 +126,54 @@ async fn forward(bind_ip: &str, local_port: i32, remote: &str) -> Result<(), Box
             if bytes_read == 0 {
                 break;
             }
-            println!("Inv <> FoxCloud {buf:?}");
+            let modbus = &buf[2..bytes_read - 2];
 
+            println!("Inv << FoxCloud {:?}", &buf[2..bytes_read - 2]);
+            let mut decoded = decoder::ModbusFrame::default();
+            decoded.decode_modbus_request(modbus);
+            println!("Inv << FoxCloud {:?}", decoded);
+
+            write.write_all(&buf[0..bytes_read]).await?;
+            copied += bytes_read;
+        }
+        Ok(copied)
+    }
+
+    async fn read_inv_send_and_forward<R, W>(
+        read: &mut R,
+        write: &mut W,
+        mut abort: broadcast::Receiver<()>,
+    ) -> tokio::io::Result<usize>
+    where
+        R: tokio::io::AsyncRead + Unpin,
+        W: tokio::io::AsyncWrite + Unpin,
+    {
+        let mut copied = 0;
+        let mut buf = [0u8; BUF_SIZE];
+        loop {
+            let bytes_read;
+            tokio::select! {
+                biased;
+
+                result = read.read(&mut buf) => {
+                    bytes_read = result?;
+                },
+                _ = abort.recv() => {
+                    eprintln!("Abort");
+                    break;
+                }
+            }
+
+            if bytes_read == 0 {
+                break;
+            }
+            let modbus = &buf[2..bytes_read - 2];
+
+            println!("Inv >> FoxCloud {:?}", &buf[2..bytes_read - 2]);
+
+            let mut decoded = decoder::ModbusFrame::default();
+            decoded.decode_modbus_response(modbus);
+            println!("Inv >> FoxCloud {:?}", decoded);
             write.write_all(&buf[0..bytes_read]).await?;
             copied += bytes_read;
         }
@@ -142,94 +183,68 @@ async fn forward(bind_ip: &str, local_port: i32, remote: &str) -> Result<(), Box
     loop {
         let remote = remote.clone();
         let (mut client, client_addr) = listener.accept().await?;
-        
+
         tokio::spawn(async move {
-            let mut remote = match TcpStream::connect(remote.as_str()).await{
+            let mut remote = match TcpStream::connect(remote.as_str()).await {
                 Ok(s) => s,
                 Err(e) => panic!("{e:?}"),
             };
             println!("New connection from {}", client_addr);
             // Establish connection to upstream for each incoming client connection
-            
-            
+
             println!("Connected to {remote:?}");
             let (mut client_read, mut client_write) = client.split();
             let (mut remote_read, mut remote_write) = remote.split();
 
             let (cancel, _) = broadcast::channel::<()>(1);
             loop {
-            let (remote_copied, client_copied) = tokio::join! {
+                let (remote_copied, client_copied) = tokio::join! {
 
 
-                read_send_and_forward(&mut remote_read, &mut client_write, cancel.subscribe())
-                    .then(|r| { let _ = cancel.send(()); async { r } }),
-                read_send_and_forward(&mut client_read, &mut remote_write, cancel.subscribe())
-                    .then(|r| { let _ = cancel.send(()); async { r } }),
-            };
+                    read_cloud_send_and_forward(&mut remote_read, &mut client_write, cancel.subscribe())
+                        .then(|r| { let _ = cancel.send(()); async { r } }),
+                    read_inv_send_and_forward(&mut client_read, &mut remote_write, cancel.subscribe())
+                        .then(|r| { let _ = cancel.send(()); async { r } }),
+                };
 
-            match client_copied {
-                Ok(count) => {
-                    if DEBUG.load(Ordering::Relaxed) {
-                        eprintln!(
-                            "Transferred {} bytes from remote client {} to upstream server",
-                            count, client_addr
-                        );
+                match client_copied {
+                    Ok(count) => {
+                        if DEBUG.load(Ordering::Relaxed) {
+                            eprintln!(
+                                "Transferred {} bytes from remote client {} to upstream server",
+                                count, client_addr
+                            );
+                        }
                     }
-                }
-                Err(err) => {
-                    eprintln!(
-                        "Error writing bytes from remote client {} to upstream server",
-                        client_addr
-                    );
-                    eprintln!("{}", err);
-                }
-            };
-
-            match remote_copied {
-                Ok(count) => {
-                    if DEBUG.load(Ordering::Relaxed) {
+                    Err(err) => {
                         eprintln!(
-                            "Transferred {} bytes from upstream server to remote client {}",
-                            count, client_addr
+                            "Error writing bytes from remote client {} to upstream server",
+                            client_addr
                         );
+                        eprintln!("{}", err);
                     }
-                }
-                Err(err) => {
-                    eprintln!(
-                        "Error writing from upstream server to remote client {}!",
-                        client_addr
-                    );
-                    eprintln!("{}", err);
-                }
-            };
-        }
+                };
+
+                match remote_copied {
+                    Ok(count) => {
+                        if DEBUG.load(Ordering::Relaxed) {
+                            eprintln!(
+                                "Transferred {} bytes from upstream server to remote client {}",
+                                count, client_addr
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "Error writing from upstream server to remote client {}!",
+                            client_addr
+                        );
+                        eprintln!("{}", err);
+                    }
+                };
+            }
             let r: Result<(), BoxedError> = Ok(());
             r
         });
     }
-}
-
-fn calc_crc(data: &[u8]) -> u16 {
-    let mut crc = 0xFFFF;
-    for x in data {
-        crc ^= u16::from(*x);
-        for _ in 0..8 {
-            let crc_odd = (crc & 0x0001) != 0;
-            crc >>= 1;
-            if crc_odd {
-                crc ^= 0xA001;
-            }
-        }
-    }
-    crc << 8 | crc >> 8
-}
-fn check_crc(adu_data: &[u8], expected_crc: u16) -> Result<(), Error> {
-    let actual_crc = calc_crc(adu_data);
-    if expected_crc != actual_crc {
-        return Err(Error::new(
-            ErrorKind::InvalidData,
-            format!("Invalid CRC: expected = 0x{expected_crc:0>4X}, actual = 0x{actual_crc:0>4X}"),
-        ));
-    }
-    Ok(())
 }

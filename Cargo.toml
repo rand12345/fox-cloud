@@ -10,9 +10,5 @@ log = "0.4.17"
 futures = "0.3.24"
 getopts = "0.2.21"
 tokio = { version = "1.25.0", features = [ "io-util", "net", "rt-multi-thread", "macros", "sync" ] }
-tokio-modbus = { version = "*", default-features = false, features = ["rtu"] }
-bytes = "1.4.0"
-smallvec = "1.10.0"
-byteorder = "1.4.3"
-anyhow = "1.0.69"
+crc16 = "0.4.0"
 
